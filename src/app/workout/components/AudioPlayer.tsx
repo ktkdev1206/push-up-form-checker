@@ -17,10 +17,19 @@ export function AudioPlayer({ trigger }: AudioPlayerProps): JSX.Element {
 
   useEffect(() => {
     if (trigger !== 'NONE') {
-      playTrigger(trigger).catch((error) => {
-        // Non-blocking: audio failures are handled silently
-        console.warn('Audio playback failed:', error);
-      });
+      // Map AudioTrigger to AUDIO_MAP keys
+      let audioType: 'POSITIVE' | 'NEGATIVE' | 'COUNTDOWN';
+      if (trigger === 'SUCCESS') {
+        audioType = 'POSITIVE';
+      } else if (trigger === 'FAILURE') {
+        audioType = 'NEGATIVE';
+      } else if (trigger === 'COUNTDOWN') {
+        audioType = 'COUNTDOWN';
+      } else {
+        return; // NONE or unknown
+      }
+      
+      playTrigger(audioType);
     }
   }, [trigger, playTrigger]);
 

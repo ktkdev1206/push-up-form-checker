@@ -1,48 +1,44 @@
 'use client';
 
-import { useCallback, useRef, useEffect } from 'react';
-import { AudioPlayer } from '@/lib/utils/audio';
-import type { AudioTrigger } from '@/types/audio';
+import { useEffect, useRef } from 'react';
+
+const AUDIO_MAP = {
+  POSITIVE: '/audio/you-dont-know-me-son.mp3',
+  NEGATIVE: '/audio/negative-warning.mp3',
+  COUNTDOWN: '/audio/countdown-beep.mp3',
+};
 
 export function useAudio() {
-  const audioPlayerRef = useRef<AudioPlayer | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const lastNegRef = useRef(0);
 
   useEffect(() => {
-    audioPlayerRef.current = new AudioPlayer();
-    audioPlayerRef.current.initialize().catch((error) => {
-      console.warn('Failed to initialize audio player:', error);
-    });
+    // Ensure this runs only in the browser
+    if (typeof window !== 'undefined') {
+      audioRef.current = new Audio();
+    }
+  }, []);
 
-    return () => {
-      // Cleanup audio player on unmount
-      if (audioPlayerRef.current) {
-        audioPlayerRef.current.cleanup();
-        audioPlayerRef.current = null;
+  const playBeep = (src: string) => {
+    if (audioRef.current) {
+      // Rate-limiting for NEGATIVE audio
+      if (src === AUDIO_MAP.NEGATIVE) {
+        const now = Date.now();
+        if (now - lastNegRef.current < 800) return;
+        lastNegRef.current = now;
       }
-    };
-  }, []);
 
-  const playTrigger = useCallback(async (trigger: AudioTrigger) => {
-    if (!audioPlayerRef.current) {
-      return;
+      audioRef.current.src = src;
+      audioRef.current.play().catch(() => {});
     }
-
-    if (trigger === 'SUCCESS') {
-      await audioPlayerRef.current.playSuccess();
-    } else if (trigger === 'FAILURE') {
-      await audioPlayerRef.current.playFailure();
-    }
-  }, []);
-
-  const setVolume = useCallback((volume: number) => {
-    if (audioPlayerRef.current) {
-      audioPlayerRef.current.setVolume(volume);
-    }
-  }, []);
-
-  return {
-    playTrigger,
-    setVolume,
   };
-}
 
+  const playTrigger = (type: 'POSITIVE' | 'NEGATIVE' | 'COUNTDOWN') => {
+    const src = AUDIO_MAP[type];
+    if (src) {
+      playBeep(src);
+    }
+  };
+
+  return { playBeep, playTrigger };
+}

@@ -1,4 +1,4 @@
-export type AudioTrigger = 'SUCCESS' | 'FAILURE' | 'NONE';
+export type AudioTrigger = 'SUCCESS' | 'FAILURE' | 'NONE' | 'COUNTDOWN';
 
 export interface AudioPlayerState {
   isReady: boolean;

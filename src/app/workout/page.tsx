@@ -3,13 +3,14 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { usePoseDetection } from '@/hooks/usePoseDetection';
+import { useAudio } from '@/hooks/useAudio';
 import { validateForm } from '@/lib/pose/formValidation';
 import { RepCounter } from '@/lib/utils/repCounter';
 import { SessionManager } from '@/lib/utils/sessionManager';
 import { RepCounter as RepCounterComponent } from './components/RepCounter';
 import { FormValidator } from './components/FormValidator';
 import { AudioPlayer } from './components/AudioPlayer';
-import { requestCameraPermission } from '@/lib/utils/camera';
+import { requestCameraPermission, validatePosition } from '@/lib/utils/camera';
 import { Button } from '@/components/ui/Button';
 import type { FormAnalysis } from '@/types/pose';
 import type { RepCounterOutput } from '@/types/ui';
@@ -27,6 +28,7 @@ export default function WorkoutPage(): JSX.Element {
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [isWorkoutRunning, setIsWorkoutRunning] = useState(false);
+  const [sessionActive, setSessionActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [formAnalysis, setFormAnalysis] = useState<FormAnalysis | null>(null);
   const [repOutput, setRepOutput] = useState<RepCounterOutput>({
@@ -35,8 +37,10 @@ export default function WorkoutPage(): JSX.Element {
     totalAttempts: 0,
     audioTrigger: 'NONE',
   });
+  const [snackbarMessage, setSnackbarMessage] = useState<string | null>(null);
 
   const { isInitialized, detectPose, getKeypoints } = usePoseDetection();
+  const { playTrigger } = useAudio();
 
   // Request camera permission on mount
   useEffect(() => {
@@ -291,60 +295,69 @@ export default function WorkoutPage(): JSX.Element {
     };
   }, [isWorkoutRunning, isInitialized, processFrame]);
 
-  const handleStartWorkout = useCallback(() => {
-    // eslint-disable-next-line no-console
-    console.log('[WorkoutPage] Start Workout clicked', {
-      isCameraReady,
-      hasStream: !!videoStream,
-      hasVideoRef: !!videoRef.current,
-    });
+  // Show snackbar message
+  const showSnackbar = useCallback((message: string) => {
+    setSnackbarMessage(message);
+    setTimeout(() => {
+      setSnackbarMessage(null);
+    }, 3000);
+  }, []);
 
-    if (!videoStream) {
+  // Validate position helper
+  const validatePositionHelper = useCallback(async (): Promise<boolean> => {
+    if (!videoRef.current || !isInitialized) {
+      return false;
+    }
+
+    try {
+      const result = await detectPose(videoRef.current, 0);
+      if (result) {
+        const keypoints = getKeypoints(result);
+        if (keypoints.length > 0) {
+          const positionState = validatePosition(keypoints);
+          return positionState.canProceed;
+        }
+      }
+      return false;
+    } catch (error) {
       // eslint-disable-next-line no-console
-      console.error('[WorkoutPage] Cannot start workout: no video stream');
-      return;
+      console.error('[WorkoutPage] Error validating position:', error);
+      return false;
     }
+  }, [isInitialized, detectPose, getKeypoints]);
 
-    if (!videoRef.current) {
-      // eslint-disable-next-line no-console
-      console.error('[WorkoutPage] Cannot start workout: video element not mounted');
-      return;
-    }
+  // Start session with countdown
+  const onStart = useCallback(async () => {
+    const ok = await validatePositionHelper();
+    if (!ok) return showSnackbar('Move back so your full body is in frame');
 
-    // Ensure stream is attached
-    if (!videoRef.current.srcObject) {
-      videoRef.current.srcObject = videoStream;
-      videoRef.current.play().catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error('[WorkoutPage] Error playing video on start:', err);
-      });
-    }
+    playTrigger('COUNTDOWN');
+    await new Promise((r) => setTimeout(r, 3000));
 
-    // Start session and workout
     sessionManagerRef.current.startSession();
-    repCounterRef.current.reset();
-    // Timestamp is now managed globally by detectPoseFrame utility
     setIsWorkoutRunning(true);
-  }, [isCameraReady, videoStream]);
+    setSessionActive(true);
+    repCounterRef.current.reset();
+  }, [validatePositionHelper, showSnackbar, playTrigger]);
 
-  const handleEndSession = useCallback(() => {
-    // eslint-disable-next-line no-console
-    console.log('[WorkoutPage] End Session clicked');
-    
-    // Stop pose detection
+  // Stop session
+  const onStop = useCallback(() => {
     setIsWorkoutRunning(false);
+    setSessionActive(false);
     
     // Stop camera tracks
     if (videoStream) {
       videoStream.getTracks().forEach((track) => track.stop());
     }
 
-    // End session and navigate to summary
+    // End session and navigate to summary with data
     sessionManagerRef.current.endSession();
     const finalSession = sessionManagerRef.current.getSession();
     
     router.push(`/summary?correct=${finalSession.correctReps}&incorrect=${finalSession.incorrectReps}&total=${finalSession.totalReps}&duration=${finalSession.duration}&errors=${encodeURIComponent(JSON.stringify(finalSession.errors))}`);
   }, [videoStream, router]);
+
+
 
   // Cleanup on unmount
   useEffect(() => {
@@ -429,17 +442,37 @@ export default function WorkoutPage(): JSX.Element {
           aria-label="Workout video feed"
         />
 
-        {/* Start Workout button overlay */}
-        {!isWorkoutRunning && (
+        {/* Start/Stop Session buttons */}
+        {!sessionActive && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-20">
-            <button
-              onClick={handleStartWorkout}
-              disabled={!isCameraReady}
-              className="bg-green-500 text-white px-8 py-4 rounded-lg text-xl font-bold hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Start workout"
+            <div className="flex flex-col gap-4 items-center">
+              <Button
+                onClick={onStart}
+                disabled={!isCameraReady}
+                className="bg-green-500 text-white px-8 py-4 rounded-lg text-xl font-bold hover:bg-green-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Start Session
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Stop Session button when active */}
+        {sessionActive && (
+          <div className="absolute top-4 right-4 z-20">
+            <Button
+              onClick={onStop}
+              className="bg-red-500 text-white px-6 py-3 rounded-lg text-lg font-bold hover:bg-red-600 transition-colors"
             >
-              Start Workout
-            </button>
+              Stop Session
+            </Button>
+          </div>
+        )}
+
+        {/* Snackbar notification */}
+        {snackbarMessage && (
+          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-6 py-4 rounded-lg shadow-lg z-30 animate-slide-up max-w-md">
+            <p className="font-medium text-center">{snackbarMessage}</p>
           </div>
         )}
 
@@ -453,15 +486,6 @@ export default function WorkoutPage(): JSX.Element {
             />
 
             {formAnalysis && <FormValidator formAnalysis={formAnalysis} />}
-
-            {/* End Session button */}
-            <button
-              onClick={handleEndSession}
-              className="absolute top-4 left-4 bg-black/50 text-white px-4 py-2 rounded-lg text-sm hover:bg-black/70 transition-colors z-20"
-              aria-label="End session"
-            >
-              End Session
-            </button>
           </div>
         )}
 
