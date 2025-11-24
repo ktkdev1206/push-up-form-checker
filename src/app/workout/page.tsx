@@ -10,7 +10,7 @@ import { SessionManager } from '@/lib/utils/sessionManager';
 import { RepCounter as RepCounterComponent } from './components/RepCounter';
 import { FormValidator } from './components/FormValidator';
 import { AudioPlayer } from './components/AudioPlayer';
-import { requestCameraPermission, validatePosition } from '@/lib/utils/camera';
+import { requestCameraPermission } from '@/lib/utils/camera';
 import { Button } from '@/components/ui/Button';
 import type { FormAnalysis } from '@/types/pose';
 import type { RepCounterOutput } from '@/types/ui';
@@ -27,6 +27,8 @@ export default function WorkoutPage(): JSX.Element {
   const [stage, setStage] = useState<WorkoutStage>('REQUESTING');
   const [videoStream, setVideoStream] = useState<MediaStream | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [bodyReady, setBodyReady] = useState(false);
   const [isWorkoutRunning, setIsWorkoutRunning] = useState(false);
   const [sessionActive, setSessionActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -37,7 +39,6 @@ export default function WorkoutPage(): JSX.Element {
     totalAttempts: 0,
     audioTrigger: 'NONE',
   });
-  const [snackbarMessage, setSnackbarMessage] = useState<string | null>(null);
 
   const { isInitialized, detectPose, getKeypoints } = usePoseDetection();
   const { playTrigger } = useAudio();
@@ -125,6 +126,7 @@ export default function WorkoutPage(): JSX.Element {
               message: err?.message,
             });
             setIsCameraReady(false);
+            setCameraReady(false);
           });
       } else {
         setIsCameraReady(true);
@@ -133,12 +135,23 @@ export default function WorkoutPage(): JSX.Element {
       // eslint-disable-next-line no-console
       console.error('[WorkoutPage] Error setting up video:', err);
       setIsCameraReady(false);
+      setCameraReady(false);
     }
 
     return () => {
       setIsCameraReady(false);
+      setCameraReady(false);
     };
   }, [videoStream]);
+
+  // Set cameraReady when camera is mounted and pose detector is loaded
+  useEffect(() => {
+    if (isCameraReady && isInitialized) {
+      setCameraReady(true);
+    } else {
+      setCameraReady(false);
+    }
+  }, [isCameraReady, isInitialized]);
 
   const handleRetryCamera = useCallback(async () => {
     setStage('REQUESTING');
@@ -164,9 +177,50 @@ export default function WorkoutPage(): JSX.Element {
     }
   }, []);
 
-  // Pose detection frame processing
+  // Pose detection for body readiness check (runs when sessionActive but !bodyReady)
+  const bodyDetectionFrame = useCallback(async () => {
+    if (!sessionActive || bodyReady || !cameraReady) {
+      return;
+    }
+
+    if (!videoRef.current) {
+      return;
+    }
+
+    const video = videoRef.current;
+    const hasSrcObject = video.srcObject instanceof MediaStream;
+    const isVideoReady = video.readyState >= 2; // HAVE_CURRENT_DATA
+
+    if (!hasSrcObject || !isVideoReady || !isInitialized) {
+      if (sessionActive && !bodyReady) {
+        animationFrameRef.current = requestAnimationFrame(bodyDetectionFrame);
+      }
+      return;
+    }
+
+    try {
+      const result = await detectPose(video, 0);
+      if (result) {
+        const keypoints = getKeypoints(result);
+        // Check if we have at least 8 keypoints (full skeleton)
+        if (keypoints && keypoints.length >= 8) {
+          setBodyReady(true);
+        }
+      }
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error('[WorkoutPage] Error in body detection:', error);
+    }
+
+    // Continue checking if body not ready yet
+    if (sessionActive && !bodyReady) {
+      animationFrameRef.current = requestAnimationFrame(bodyDetectionFrame);
+    }
+  }, [sessionActive, bodyReady, cameraReady, isInitialized, detectPose, getKeypoints]);
+
+  // Pose detection frame processing for rep counting (runs when workout is running)
   const processFrame = useCallback(async () => {
-    if (!isWorkoutRunning) {
+    if (!isWorkoutRunning || !bodyReady) {
       return;
     }
 
@@ -238,20 +292,37 @@ export default function WorkoutPage(): JSX.Element {
 
     // Continue processing frames
     animationFrameRef.current = requestAnimationFrame(processFrame);
-  }, [isWorkoutRunning, isInitialized, detectPose, getKeypoints]);
+  }, [isWorkoutRunning, bodyReady, isInitialized, detectPose, getKeypoints]);
 
-  // Start/stop pose detection loop based on workout state
+  // Start body detection loop when session is active but body not ready
+  useEffect(() => {
+    if (sessionActive && !bodyReady && cameraReady) {
+      // eslint-disable-next-line no-console
+      console.log('[WorkoutPage] Starting body detection loop');
+      animationFrameRef.current = requestAnimationFrame(bodyDetectionFrame);
+    }
+
+    return () => {
+      if (animationFrameRef.current && !isWorkoutRunning) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+    };
+  }, [sessionActive, bodyReady, cameraReady, bodyDetectionFrame, isWorkoutRunning]);
+
+  // Start/stop rep counting loop based on workout state
   useEffect(() => {
     // eslint-disable-next-line no-console
-    console.log('[WorkoutPage] Pose detection effect', {
+    console.log('[WorkoutPage] Rep counting effect', {
       hasVideoRef: !!videoRef.current,
       hasSrcObject: videoRef.current?.srcObject instanceof MediaStream,
       isInitialized,
       isRunning: isWorkoutRunning,
+      bodyReady,
       isVideoReady: (videoRef.current?.readyState ?? 0) >= 2,
     });
 
-    if (!isWorkoutRunning) {
+    if (!isWorkoutRunning || !bodyReady) {
       // Stop any running loop
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
@@ -282,9 +353,9 @@ export default function WorkoutPage(): JSX.Element {
       return;
     }
 
-    // All prerequisites met, start detection loop
+    // All prerequisites met, start rep counting loop
     // eslint-disable-next-line no-console
-    console.log('[WorkoutPage] Starting pose detection loop');
+    console.log('[WorkoutPage] Starting rep counting loop');
     animationFrameRef.current = requestAnimationFrame(processFrame);
 
     return () => {
@@ -293,57 +364,40 @@ export default function WorkoutPage(): JSX.Element {
         animationFrameRef.current = null;
       }
     };
-  }, [isWorkoutRunning, isInitialized, processFrame]);
+  }, [isWorkoutRunning, bodyReady, isInitialized, processFrame]);
 
-  // Show snackbar message
-  const showSnackbar = useCallback((message: string) => {
-    setSnackbarMessage(message);
-    setTimeout(() => {
-      setSnackbarMessage(null);
-    }, 3000);
-  }, []);
-
-  // Validate position helper
-  const validatePositionHelper = useCallback(async (): Promise<boolean> => {
-    if (!videoRef.current || !isInitialized) {
-      return false;
-    }
-
-    try {
-      const result = await detectPose(videoRef.current, 0);
-      if (result) {
-        const keypoints = getKeypoints(result);
-        if (keypoints.length > 0) {
-          const positionState = validatePosition(keypoints);
-          return positionState.canProceed;
-        }
-      }
-      return false;
-    } catch (error) {
+  // Auto-start session when bodyReady transitions from false to true
+  useEffect(() => {
+    if (bodyReady && sessionActive && !isWorkoutRunning) {
       // eslint-disable-next-line no-console
-      console.error('[WorkoutPage] Error validating position:', error);
-      return false;
+      console.log('[WorkoutPage] Body ready, auto-starting session');
+      
+      const startSession = async () => {
+        playTrigger('COUNTDOWN');
+        await new Promise((r) => setTimeout(r, 3000));
+
+        sessionManagerRef.current.startSession();
+        setIsWorkoutRunning(true);
+        repCounterRef.current.reset();
+      };
+
+      startSession().catch((error) => {
+        // eslint-disable-next-line no-console
+        console.error('[WorkoutPage] Error starting session:', error);
+      });
     }
-  }, [isInitialized, detectPose, getKeypoints]);
+  }, [bodyReady, sessionActive, isWorkoutRunning, playTrigger]);
 
-  // Start session with countdown
-  const onStart = useCallback(async () => {
-    const ok = await validatePositionHelper();
-    if (!ok) return showSnackbar('Move back so your full body is in frame');
-
-    playTrigger('COUNTDOWN');
-    await new Promise((r) => setTimeout(r, 3000));
-
-    sessionManagerRef.current.startSession();
-    setIsWorkoutRunning(true);
+  // Start session - just activate session, pose detection will handle the rest
+  const onStart = useCallback(() => {
     setSessionActive(true);
-    repCounterRef.current.reset();
-  }, [validatePositionHelper, showSnackbar, playTrigger]);
+  }, []);
 
   // Stop session
   const onStop = useCallback(() => {
     setIsWorkoutRunning(false);
     setSessionActive(false);
+    setBodyReady(false);
     
     // Stop camera tracks
     if (videoStream) {
@@ -442,7 +496,7 @@ export default function WorkoutPage(): JSX.Element {
           aria-label="Workout video feed"
         />
 
-        {/* Start/Stop Session buttons */}
+        {/* Start Session button */}
         {!sessionActive && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50 z-20">
             <div className="flex flex-col gap-4 items-center">
@@ -457,8 +511,19 @@ export default function WorkoutPage(): JSX.Element {
           </div>
         )}
 
+        {/* Camera Overlay - shows when session is active but body not ready */}
+        {sessionActive && !bodyReady && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-30">
+            <div className="text-center px-8 max-w-md">
+              <p className="text-white text-xl font-medium mb-4">
+                Place the phone on the floor angled at your torso. Step back until your full body is visible.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Stop Session button when active */}
-        {sessionActive && (
+        {sessionActive && bodyReady && (
           <div className="absolute top-4 right-4 z-20">
             <Button
               onClick={onStop}
@@ -466,13 +531,6 @@ export default function WorkoutPage(): JSX.Element {
             >
               Stop Session
             </Button>
-          </div>
-        )}
-
-        {/* Snackbar notification */}
-        {snackbarMessage && (
-          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-red-600 text-white px-6 py-4 rounded-lg shadow-lg z-30 animate-slide-up max-w-md">
-            <p className="font-medium text-center">{snackbarMessage}</p>
           </div>
         )}
 
