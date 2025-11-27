@@ -17,7 +17,7 @@ export const SHOULDER_WIDTH_MAX = 0.35;
 
 // Rep counting (MVP-friendly - more responsive)
 export const REP_DEBOUNCE_MS = 300; // prevent double-counting (was 500, now more responsive)
-export const REPS_FOR_SUCCESS_AUDIO = 10; // play audio every N correct reps
+export const REPS_FOR_SUCCESS_AUDIO = 5; // play audio every N correct reps
 export const AUDIO_DEBOUNCE_MS = 1000; // prevent audio spam
 
 // Camera settings
