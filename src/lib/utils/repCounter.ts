@@ -4,6 +4,11 @@ import { REP_DEBOUNCE_MS, REPS_FOR_SUCCESS_AUDIO, AUDIO_DEBOUNCE_MS } from '@/li
 
 type RepCounterState = 'WAITING_FOR_DOWN' | 'WAITING_FOR_UP';
 
+// Rep counting thresholds
+const STRICT_DOWN_THRESHOLD = 75; // elbow angle must go under this to be considered a real "down"
+const UP_THRESHOLD = 155; // elbow angle must go above this to be considered "up"
+const MIN_REP_INTERVAL = 300; // ms minimum between counted reps to avoid bounce
+
 /**
  * Rep counter state machine for tracking push-up reps
  * Implements debouncing and audio trigger logic
@@ -16,6 +21,8 @@ export class RepCounter {
   private lastStateChangeTime = 0;
   private lastAudioTrigger: 'SUCCESS' | 'FAILURE' | 'NONE' = 'NONE';
   private lastAudioTime = 0;
+  private minElbowDuringDown: number | null = null;
+  private lastRepTimestamp = 0;
 
   /**
    * Process a frame of form analysis
@@ -23,19 +30,17 @@ export class RepCounter {
    * @param timestamp Current timestamp in milliseconds
    */
   processFrame(formAnalysis: FormAnalysis, timestamp: number): void {
-    const { state: formState } = formAnalysis;
+    const currentElbowAngle = formAnalysis.elbowAngles.average;
     const previousState = this.state;
     const previousCorrectReps = this.correctReps;
     const previousIncorrectReps = this.incorrectReps;
-
-    // Check debounce for state changes (only for transitions, not for invalid form)
-    const timeSinceLastChange = timestamp - this.lastStateChangeTime;
-    const shouldDebounce = timeSinceLastChange < REP_DEBOUNCE_MS && this.lastStateChangeTime > 0;
+    const now = timestamp;
 
     // Handle invalid form - increment error but don't reset cycle (MVP-friendly)
-    if (formState === 'INVALID_FORM') {
-      // Only increment incorrect reps if debounce allows
-      if (!shouldDebounce) {
+    if (formAnalysis.state === 'INVALID_FORM') {
+      // Only increment incorrect reps if enough time has passed
+      const timeSinceLastChange = now - this.lastStateChangeTime;
+      if (timeSinceLastChange >= REP_DEBOUNCE_MS || this.lastStateChangeTime === 0) {
         this.incorrectReps++;
         this.totalAttempts++;
         this.lastStateChangeTime = timestamp;
@@ -55,7 +60,6 @@ export class RepCounter {
           correctReps: this.correctReps,
           incorrectReps: this.incorrectReps,
           timestamp,
-          debounced: shouldDebounce,
         });
       }
 
@@ -63,53 +67,89 @@ export class RepCounter {
     }
 
     // Ignore partial reps and not detected states (but don't reset cycle)
-    if (formState === 'PARTIAL_REP' || formState === 'NOT_DETECTED') {
+    if (formAnalysis.state === 'PARTIAL_REP' || formAnalysis.state === 'NOT_DETECTED') {
       return;
     }
 
-    // Apply debounce only to valid state transitions
-    if (shouldDebounce && (formState === 'VALID_DOWN' || formState === 'VALID_UP')) {
-      return;
-    }
+    // State machine transitions based on elbow angle
+    if (this.state === 'WAITING_FOR_DOWN') {
+      // Check if elbow angle goes below strict down threshold
+      if (currentElbowAngle <= STRICT_DOWN_THRESHOLD) {
+        this.state = 'WAITING_FOR_UP';
+        this.minElbowDuringDown = currentElbowAngle;
+        this.lastStateChangeTime = now;
 
-    // State machine transitions
-    if (this.state === 'WAITING_FOR_DOWN' && formState === 'VALID_DOWN') {
-      this.state = 'WAITING_FOR_UP';
-      this.lastStateChangeTime = timestamp;
-
-      // Debug logging
-      if (process.env.NODE_ENV === 'development') {
-        // eslint-disable-next-line no-console
-        console.log('[RepCounter] State transition: WAITING_FOR_DOWN → WAITING_FOR_UP', {
-          timestamp,
-          correctReps: this.correctReps,
-        });
+        // Debug logging
+        if (process.env.NODE_ENV === 'development') {
+          // eslint-disable-next-line no-console
+          console.log('[RepCounter] State transition: WAITING_FOR_DOWN → WAITING_FOR_UP', {
+            timestamp,
+            currentElbowAngle,
+            correctReps: this.correctReps,
+          });
+        }
       }
-    } else if (this.state === 'WAITING_FOR_UP' && formState === 'VALID_UP') {
-      // Complete rep!
-      this.correctReps++;
-      this.totalAttempts++;
-      this.state = 'WAITING_FOR_DOWN';
-      this.lastStateChangeTime = timestamp;
+    } else if (this.state === 'WAITING_FOR_UP') {
+      // Update minimum elbow angle during down phase
+      this.minElbowDuringDown = Math.min(
+        this.minElbowDuringDown ?? 999,
+        currentElbowAngle
+      );
 
-      // Check if we should trigger success audio
+      // Check if elbow angle goes above up threshold and enough time has passed
       if (
-        this.correctReps % REPS_FOR_SUCCESS_AUDIO === 0 &&
-        timestamp - this.lastAudioTime >= AUDIO_DEBOUNCE_MS
+        currentElbowAngle >= UP_THRESHOLD &&
+        (now - this.lastRepTimestamp) > MIN_REP_INTERVAL
       ) {
-        this.lastAudioTrigger = 'SUCCESS';
-        this.lastAudioTime = timestamp;
-      }
+        // Store minElbowDuringDown before resetting for debug logging
+        const minElbowValue = this.minElbowDuringDown;
 
-      // Debug logging
-      if (process.env.NODE_ENV === 'development') {
-        // eslint-disable-next-line no-console
-        console.log('[RepCounter] ✅ REP COUNTED!', {
-          correctReps: this.correctReps,
-          incorrectReps: this.incorrectReps,
-          totalAttempts: this.totalAttempts,
-          timestamp,
-        });
+        // Decide if rep is correct or incomplete
+        if (
+          this.minElbowDuringDown !== null &&
+          this.minElbowDuringDown <= STRICT_DOWN_THRESHOLD
+        ) {
+          // Correct rep - went deep enough during down phase
+          this.correctReps++;
+          this.totalAttempts++;
+
+          // Check if we should trigger success audio
+          if (
+            this.correctReps % REPS_FOR_SUCCESS_AUDIO === 0 &&
+            timestamp - this.lastAudioTime >= AUDIO_DEBOUNCE_MS
+          ) {
+            this.lastAudioTrigger = 'SUCCESS';
+            this.lastAudioTime = timestamp;
+          }
+        } else {
+          // Incorrect rep - didn't go deep enough
+          this.incorrectReps++;
+          this.totalAttempts++;
+
+          // Trigger failure audio (with debounce)
+          if (timestamp - this.lastAudioTime >= AUDIO_DEBOUNCE_MS) {
+            this.lastAudioTrigger = 'FAILURE';
+            this.lastAudioTime = timestamp;
+          }
+        }
+
+        // Reset state for next rep
+        this.minElbowDuringDown = null;
+        this.state = 'WAITING_FOR_DOWN';
+        this.lastRepTimestamp = now;
+        this.lastStateChangeTime = now;
+
+        // Debug logging
+        if (process.env.NODE_ENV === 'development') {
+          // eslint-disable-next-line no-console
+          console.log('[RepCounter] ✅ REP COUNTED!', {
+            correctReps: this.correctReps,
+            incorrectReps: this.incorrectReps,
+            totalAttempts: this.totalAttempts,
+            minElbowDuringDown: minElbowValue,
+            timestamp,
+          });
+        }
       }
     }
 
@@ -124,7 +164,8 @@ export class RepCounter {
       console.log('[RepCounter] State/Count changed', {
         previousState,
         newState: this.state,
-        formState,
+        currentElbowAngle,
+        minElbowDuringDown: this.minElbowDuringDown,
         previousCorrectReps,
         newCorrectReps: this.correctReps,
         previousIncorrectReps,
@@ -172,6 +213,8 @@ export class RepCounter {
     this.lastStateChangeTime = 0;
     this.lastAudioTrigger = 'NONE';
     this.lastAudioTime = 0;
+    this.minElbowDuringDown = null;
+    this.lastRepTimestamp = 0;
   }
 }
 

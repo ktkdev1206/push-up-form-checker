@@ -277,3 +277,41 @@ export class AudioPlayer {
     }
   }
 }
+
+// Simple standalone audio functions
+const NEGATIVE_SRC = '/audio/negative-warning.mp3';
+const POSITIVE_SRC = '/audio/you-dont-know-me-son.mp3';
+const COUNTDOWN_SRC = '/audio/countdown-beep.mp3';
+
+let lastNegativePlay = 0;
+const NEGATIVE_COOLDOWN_MS = 1500;
+
+export function playPositive(): void {
+  try {
+    const a = new Audio(POSITIVE_SRC);
+    a.play().catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
+export function playNegative(): void {
+  const now = Date.now();
+  if (now - lastNegativePlay < NEGATIVE_COOLDOWN_MS) return; // rate limit
+  lastNegativePlay = now;
+  try {
+    const a = new Audio(NEGATIVE_SRC);
+    a.play().catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
+export function playCountdown(): void {
+  try {
+    const a = new Audio(COUNTDOWN_SRC);
+    a.play().catch(() => {});
+  } catch {
+    // ignore
+  }
+}
